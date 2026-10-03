@@ -8,7 +8,7 @@ import type { SeisArray, ArrayFilterState } from '@/types/array';
 import { createEmptyArrayFilter } from '@/types/array';
 import type { SeisStation, StationFilterState } from '@/types/station';
 import { createEmptyStationFilter } from '@/types/station';
-import { apertureKm } from '@/utils/geo';
+import { apertureFromCenter } from '@/utils/reconcile';
 import type { RootState } from '@/stores/store';
 
 /** 选择器入参统一用 RootState，避免本地结构类型重复定义 */
@@ -120,19 +120,15 @@ export const removeStation = createAsyncThunk('array/removeStation', async (stat
   return stationId;
 });
 
-/** 按经纬度重算台阵孔径并回写台阵表 */
+/**
+ * 重算台阵孔径并回写台阵表。
+ * 口径认中心：已认账复测坐标优先（测量组那份），未认账回退中心初设坐标；台站归属认中心 arrayId。
+ */
 export const recomputeAperture = createAsyncThunk(
   'array/recomputeAperture',
   async (arrayId: string) => {
-    const stations = await db.stations.where('arrayId').equals(arrayId).toArray();
-    const computed = apertureKm(
-      stations.map((station) => ({
-        id: station.id,
-        code: station.code,
-        lat: station.lat,
-        lng: station.lng,
-      }))
-    );
+    const [stations, surveys] = await Promise.all([db.stations.toArray(), db.surveyCoords.toArray()]);
+    const computed = apertureFromCenter(arrayId, stations, surveys);
     await db.arrays.update(arrayId, { apertureKm: computed, updatedAt: Date.now() } as never);
     return { arrayId, apertureKm: computed };
   }

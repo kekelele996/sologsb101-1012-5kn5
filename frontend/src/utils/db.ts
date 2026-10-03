@@ -12,9 +12,11 @@ import type { Instrument } from '@/types/instrument';
 import { judgeCalibration } from '@/types/calibration';
 import type { Calibration } from '@/types/calibration';
 import type { Replace } from '@/types/replace';
+import type { SurveyCoord, SurveyStatus } from '@/types/survey';
+import { decimalToDmsRecord, resolveCoord } from '@/utils/geo';
 
 /** 当前数据结构版本号：每次调整字段结构必须 +1 并补迁移 */
-export const DB_VERSION = 2;
+export const DB_VERSION = 3;
 
 /** 数据库名（浏览器 IndexedDB 中的库名） */
 export const DB_NAME = 'gbseisarray';
@@ -36,6 +38,8 @@ export interface BackupPayload {
   instruments: Instrument[];
   calibrations: Calibration[];
   replaces: Replace[];
+  /** 测量组复测坐标（v3 起；旧备份缺省时按空数组处理） */
+  surveyCoords: SurveyCoord[];
 }
 
 export class SeisArrayDatabase extends Dexie {
@@ -44,6 +48,8 @@ export class SeisArrayDatabase extends Dexie {
   instruments!: Table<Instrument, string>;
   calibrations!: Table<Calibration, string>;
   replaces!: Table<Replace, string>;
+  /** 测量组复测坐标：与中心台站表分开管，只按 code 对账 */
+  surveyCoords!: Table<SurveyCoord, string>;
 
   constructor() {
     super(DB_NAME);
@@ -58,7 +64,7 @@ export class SeisArrayDatabase extends Dexie {
     });
 
     // v2：补齐筛选与统计需要的索引（孔径/布设日期、经纬度/基岩、类型/序列号、灵敏度/结论、原因）
-    this.version(DB_VERSION)
+    this.version(2)
       .stores({
         arrays: 'id, name, state, apertureKm, deployDate, department, updatedAt',
         stations: 'id, arrayId, code, lat, lng, elevM, bedrock, updatedAt',
@@ -86,6 +92,56 @@ export class SeisArrayDatabase extends Dexie {
               Object.assign(row, factory());
             });
         }
+      });
+
+    // v3：复测坐标与中心台账分开管——新增 surveyCoords 表（测量组那份）。
+    // 旧复测数据只有度分秒（latDms/lngDms），升级时补出十进制 lat/lng 才能参与孔径计算。
+    this.version(DB_VERSION)
+      .stores({
+        arrays: 'id, name, state, apertureKm, deployDate, department, updatedAt',
+        stations: 'id, arrayId, code, lat, lng, elevM, bedrock, updatedAt',
+        instruments: 'id, stationId, type, model, serialNo, installDate, state, updatedAt',
+        calibrations: 'id, instrumentId, date, sensitivity, selfNoise, responseVerdict, updatedAt',
+        replaces: 'id, instrumentId, state, date, newSerialNo, updatedAt',
+        surveyCoords: 'id, code, status, measuredAt, acceptedAt, updatedAt',
+      })
+      .upgrade(async (tx) => {
+        // 预置一条「只有度分秒」的历史复测：模拟升级前外业平板导入的旧数据
+        const legacy: Record<string, unknown> = {
+          id: 'srv_hx01_legacy',
+          code: 'HX01',
+          lat: 0,
+          lng: 0,
+          latDms: '25°25′55.6″N',
+          lngDms: '119°20′31.6″E',
+          measuredAt: '2020-05-12',
+          surveyor: '外业测量组（平板导入）',
+          method: '平板 GNSS',
+          status: '待对账',
+          reconcileNote: '历史记录仅存度分秒，升级补出十进制后再对账',
+          retryCount: 0,
+          acceptedAt: null,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        };
+        await tx.table('surveyCoords').add(legacy);
+
+        // 升级补十进制：由度分秒解析回填 lat/lng（解析不出来的保持 0，不参与孔径）
+        await tx
+          .table('surveyCoords')
+          .toCollection()
+          .modify((row: Record<string, unknown>) => {
+            const resolved = resolveCoord({
+              lat: typeof row.lat === 'number' ? row.lat : null,
+              lng: typeof row.lng === 'number' ? row.lng : null,
+              latDms: typeof row.latDms === 'string' ? row.latDms : null,
+              lngDms: typeof row.lngDms === 'string' ? row.lngDms : null,
+            });
+            if (resolved) {
+              row.lat = resolved.lat;
+              row.lng = resolved.lng;
+            }
+          });
       });
   }
 }
@@ -159,6 +215,24 @@ interface SeedArray {
   state: SeisArray['state'];
   department: string;
   stations: SeedStation[];
+}
+
+/** 测量组复测播种：lat/lng 可缺省（旧数据只有度分秒，由 resolveCoord 补出） */
+interface SeedSurvey {
+  id: string;
+  code: string;
+  lat?: number;
+  lng?: number;
+  latDms?: string;
+  lngDms?: string;
+  measuredAt: string;
+  surveyor: string;
+  method: string;
+  status: SurveyStatus;
+  reconcileNote: string;
+  retryCount: number;
+  acceptedAt: number | null;
+  stampOffset: number;
 }
 
 /**
@@ -488,9 +562,150 @@ export async function seedDemoData(): Promise<void> {
     },
   ];
 
+  /**
+   * 测量组复测坐标（与中心 stations 分开管，按 code 对账）：
+   * - LTX01 两条「已认账」：演示台站迁走后复测坐标仍跟 code、中心取最新认账、认下不退回；
+   * - LTX02 已认账（坐标相对初设有偏移）；
+   * - LTX03「待认账」：已对上中心名册，等中心认账；
+   * - HX99「待确认」：中心名册没有此码，挂起等确认、可重试；
+   * - LTX04「待对账」：刚复测还没对账；
+   * - HX01 legacy：旧记录只有度分秒，升级/播种时补出十进制。
+   */
+  const surveySeeds: SeedSurvey[] = [
+    {
+      id: 'srv_ltx01_old',
+      code: 'LTX01',
+      lat: 30.8434,
+      lng: 103.5637,
+      measuredAt: '2022-05-09',
+      surveyor: '周渝',
+      method: '平板 GNSS',
+      status: '已认账',
+      reconcileNote: '中心已认账（旧点位），保留追溯',
+      retryCount: 0,
+      acceptedAt: now - 400 * 86400000,
+      stampOffset: 301,
+    },
+    {
+      id: 'srv_ltx01_new',
+      code: 'LTX01',
+      lat: 30.8472,
+      lng: 103.5661,
+      measuredAt: '2026-03-22',
+      surveyor: '周渝',
+      method: '全站仪',
+      status: '已认账',
+      reconcileNote: '台站迁址后复测，中心已认账，孔径按新点位重算',
+      retryCount: 1,
+      acceptedAt: now - 20 * 86400000,
+      stampOffset: 302,
+    },
+    {
+      id: 'srv_ltx02',
+      code: 'LTX02',
+      lat: 30.9199,
+      lng: 103.6435,
+      measuredAt: '2026-03-23',
+      surveyor: '周渝',
+      method: '平板 GNSS',
+      status: '已认账',
+      reconcileNote: '中心已认账，实算孔径按复测坐标',
+      retryCount: 0,
+      acceptedAt: now - 18 * 86400000,
+      stampOffset: 303,
+    },
+    {
+      id: 'srv_ltx03',
+      code: 'LTX03',
+      lat: 30.7791,
+      lng: 103.4972,
+      measuredAt: '2026-04-02',
+      surveyor: '林之遥',
+      method: '平板 GNSS',
+      status: '待认账',
+      reconcileNote: '台站码已对上中心名册，待中心认账',
+      retryCount: 0,
+      acceptedAt: null,
+      stampOffset: 304,
+    },
+    {
+      id: 'srv_hx99',
+      code: 'HX99',
+      lat: 25.6012,
+      lng: 119.7023,
+      measuredAt: '2026-04-05',
+      surveyor: '陈立群',
+      method: '平板 GNSS',
+      status: '待确认',
+      reconcileNote: '中心名册暂无此台站码，先挂起等确认；测量组核对台站码后可重试对账',
+      retryCount: 1,
+      acceptedAt: null,
+      stampOffset: 305,
+    },
+    {
+      id: 'srv_ltx04',
+      code: 'LTX04',
+      lat: 30.8655,
+      lng: 103.6012,
+      measuredAt: '2026-04-10',
+      surveyor: '周渝',
+      method: '平板 GNSS',
+      status: '待对账',
+      reconcileNote: '外业平板复测，尚未按台站码对账',
+      retryCount: 0,
+      acceptedAt: null,
+      stampOffset: 306,
+    },
+    {
+      // 旧数据：只有度分秒，播种时同样走补十进制逻辑
+      id: 'srv_hx01_legacy',
+      code: 'HX01',
+      latDms: '25°25′55.6″N',
+      lngDms: '119°20′31.6″E',
+      measuredAt: '2020-05-12',
+      surveyor: '外业测量组（平板导入）',
+      method: '平板 GNSS',
+      status: '待对账',
+      reconcileNote: '历史记录仅存度分秒，补出十进制后再对账',
+      retryCount: 0,
+      acceptedAt: null,
+      stampOffset: 307,
+    },
+  ];
+
+  const surveyRows: SurveyCoord[] = surveySeeds.map((seed) => {
+    const resolved = resolveCoord({
+      lat: seed.lat,
+      lng: seed.lng,
+      latDms: seed.latDms,
+      lngDms: seed.lngDms,
+    });
+    const lat = resolved?.lat ?? 0;
+    const lng = resolved?.lng ?? 0;
+    const dms = seed.latDms && seed.lngDms
+      ? { latDms: seed.latDms, lngDms: seed.lngDms }
+      : decimalToDmsRecord(lat, lng);
+    return {
+      id: seed.id,
+      code: seed.code.trim().toUpperCase(),
+      lat,
+      lng,
+      ...dms,
+      measuredAt: seed.measuredAt,
+      surveyor: seed.surveyor,
+      method: seed.method,
+      status: seed.status,
+      reconcileNote: seed.reconcileNote,
+      retryCount: seed.retryCount,
+      acceptedAt: seed.acceptedAt,
+      createdAt: now + seed.stampOffset,
+      updatedAt: now + seed.stampOffset,
+    };
+  });
+
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces, db.surveyCoords],
     async () => {
       const stamp = (offset: number): { createdAt: number; updatedAt: number } => ({
         createdAt: now + offset,
@@ -537,6 +752,7 @@ export async function seedDemoData(): Promise<void> {
       await db.instruments.bulkPut(instrumentRows);
       await db.calibrations.bulkPut(calibrationRows);
       await db.replaces.bulkPut(replaces);
+      await db.surveyCoords.bulkPut(surveyRows);
     }
   );
 }
@@ -555,7 +771,7 @@ export async function initDatabase(): Promise<void> {
 export async function clearAllTables(): Promise<void> {
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces, db.surveyCoords],
     async () => {
       await Promise.all([
         db.arrays.clear(),
@@ -563,6 +779,7 @@ export async function clearAllTables(): Promise<void> {
         db.instruments.clear(),
         db.calibrations.clear(),
         db.replaces.clear(),
+        db.surveyCoords.clear(),
       ]);
     }
   );
@@ -576,14 +793,15 @@ export async function resetDatabase(): Promise<void> {
 
 /** 统计各表行数，供页脚概览与几何页展示 */
 export async function countAll(): Promise<Record<string, number>> {
-  const [arrays, stations, instruments, calibrations, replaces] = await Promise.all([
+  const [arrays, stations, instruments, calibrations, replaces, surveyCoords] = await Promise.all([
     db.arrays.count(),
     db.stations.count(),
     db.instruments.count(),
     db.calibrations.count(),
     db.replaces.count(),
+    db.surveyCoords.count(),
   ]);
-  return { arrays, stations, instruments, calibrations, replaces };
+  return { arrays, stations, instruments, calibrations, replaces, surveyCoords };
 }
 
 /** 写入结构版本号到 localStorage，便于几何页比对 */

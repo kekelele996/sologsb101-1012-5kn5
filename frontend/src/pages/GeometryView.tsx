@@ -20,14 +20,15 @@ import {
   Typography,
   Upload,
 } from 'antd';
-import { DownloadOutlined, ReloadOutlined, UploadOutlined } from '@ant-design/icons';
+import { DownloadOutlined, ReloadOutlined, SyncOutlined, UploadOutlined } from '@ant-design/icons';
 import type { UploadFile } from 'antd';
 import StatBadge from '@/components/common/StatBadge';
 import EmptyPanel from '@/components/common/EmptyPanel';
-import { useAppSelector } from '@/stores/store';
+import { useAppDispatch, useAppSelector } from '@/stores/store';
 import { selectArrays, selectStations } from '@/stores/arraySlice';
 import { selectInstruments } from '@/stores/instrumentSlice';
 import { selectCalibrations, selectReplaces } from '@/stores/calibrationSlice';
+import { selectSurveyCoords, recomputeAllAperturesFromCenter } from '@/stores/surveySlice';
 import {
   DB_NAME,
   DB_VERSION,
@@ -51,17 +52,27 @@ import {
   type CountMap,
 } from '@/utils/export';
 import { bearingDeg, round, stationDistances, toLocalPlane, planeViewBox } from '@/utils/geo';
+import { centerPointsOfArray, type CenterPoint } from '@/utils/reconcile';
 
-const EMPTY_COUNTS: CountMap = { arrays: 0, stations: 0, instruments: 0, calibrations: 0, replaces: 0 };
+const EMPTY_COUNTS: CountMap = {
+  arrays: 0,
+  stations: 0,
+  instruments: 0,
+  calibrations: 0,
+  replaces: 0,
+  surveyCoords: 0,
+};
 
 export default function GeometryView() {
   const { message } = AntdApp.useApp();
+  const dispatch = useAppDispatch();
 
   const arrays = useAppSelector(selectArrays);
   const stations = useAppSelector(selectStations);
   const instruments = useAppSelector(selectInstruments);
   const calibrations = useAppSelector(selectCalibrations);
   const replaces = useAppSelector(selectReplaces);
+  const surveyCoords = useAppSelector(selectSurveyCoords);
 
   const [selectedArrayId, setSelectedArrayId] = useState<string | null>(null);
   const [counts, setCounts] = useState<CountMap>(EMPTY_COUNTS);
@@ -86,13 +97,22 @@ export default function GeometryView() {
   useEffect(() => {
     void refresh();
     // 数据变化后刷新统计
-  }, [arrays, stations, instruments, calibrations, replaces]);
+  }, [arrays, stations, instruments, calibrations, replaces, surveyCoords]);
 
   const activeArrayId = selectedArrayId ?? arrays[0]?.id ?? null;
   const activeArray = arrays.find((row) => row.id === activeArrayId) ?? null;
   const activeStations = useMemo(
     () => stations.filter((station) => station.arrayId === activeArrayId),
     [activeArrayId, stations]
+  );
+
+  /**
+   * 中心口径有效点位：已认账复测坐标优先，未认账回退中心初设坐标。
+   * 几何平面图 / 孔径 / 辐射距离统一按这份算（归属 arrayId 仍认中心）。
+   */
+  const centerPoints = useMemo<CenterPoint[]>(
+    () => (activeArrayId ? centerPointsOfArray(activeArrayId, stations, surveyCoords) : []),
+    [activeArrayId, stations, surveyCoords]
   );
 
   /** 台阵几何与标定结论汇总 */
@@ -106,25 +126,26 @@ export default function GeometryView() {
       instruments,
       calibrations,
       replaces,
+      surveyCoords,
     };
     return buildArraySummaries(payload);
-  }, [arrays, calibrations, instruments, replaces, stations]);
+  }, [arrays, calibrations, instruments, replaces, stations, surveyCoords]);
 
   const activeSummary = summaries.find((row) => row.arrayId === activeArrayId) ?? null;
 
-  /** 几何平面坐标（以台阵中心为原点，单位 km） */
+  /** 几何平面坐标（以台阵中心为原点，单位 km；点位取中心口径） */
   const plane = useMemo(() => {
     if (!activeSummary?.center) return [];
     return toLocalPlane(
-      activeStations.map((station) => ({
-        id: station.id,
-        code: station.code,
-        lat: station.lat,
-        lng: station.lng,
+      centerPoints.map((point) => ({
+        id: point.id,
+        code: point.code,
+        lat: point.lat,
+        lng: point.lng,
       })),
       activeSummary.center
     );
-  }, [activeStations, activeSummary]);
+  }, [centerPoints, activeSummary]);
 
   const viewBox = useMemo(() => planeViewBox(plane), [plane]);
 
@@ -149,15 +170,15 @@ export default function GeometryView() {
   const radial = useMemo(
     () =>
       stationRadialDistances(
-        activeStations.map((station) => ({
-          id: station.id,
-          code: station.code,
-          lat: station.lat,
-          lng: station.lng,
+        centerPoints.map((point) => ({
+          id: point.id,
+          code: point.code,
+          lat: point.lat,
+          lng: point.lng,
         })),
         activeSummary?.center ?? null
       ),
-    [activeStations, activeSummary]
+    [centerPoints, activeSummary]
   );
 
   const handleExport = async (): Promise<void> => {
@@ -213,9 +234,25 @@ export default function GeometryView() {
     }
   };
 
+  /** 按中心口径（已认账复测优先、未认账回退初设）批量重算全部台阵孔径与分档 */
+  const handleRecomputeAll = async (): Promise<void> => {
+    setBusy(true);
+    try {
+      const results = await dispatch(recomputeAllAperturesFromCenter()).unwrap();
+      await refresh();
+      const text = results.map((row) => `${row.apertureKm} km`).join('、');
+      setNotice(`已按中心手里那份重算全部台阵孔径：${text}（未认账复测不影响孔径）。`);
+      message.success('已按中心口径重算孔径');
+    } catch (error) {
+      message.error(error instanceof Error ? error.message : '重算孔径失败');
+    } finally {
+      setBusy(false);
+    }
+  };
+
   const handleReset = async (): Promise<void> => {
     const confirmed = window.confirm(
-      '将清空全部本地数据并重新播种演示数据（台阵、台站、仪器、标定、更换）。确认继续？'
+      '将清空全部本地数据并重新播种演示数据（台阵、台站、仪器、标定、更换、复测坐标）。确认继续？'
     );
     if (!confirmed) return;
     setBusy(true);
@@ -269,6 +306,9 @@ export default function GeometryView() {
           <Button icon={<ReloadOutlined />} onClick={() => void refresh()}>
             刷新
           </Button>
+          <Button icon={<SyncOutlined />} loading={busy} onClick={() => void handleRecomputeAll()}>
+            按中心口径重算孔径
+          </Button>
           <Button onClick={() => void handleCopy()}>复制结论</Button>
           <Button type="primary" icon={<DownloadOutlined />} loading={busy} onClick={() => void handleExport()}>
             导出 JSON
@@ -284,6 +324,7 @@ export default function GeometryView() {
         <StatBadge label="仪器" value={counts.instruments} suffix="台" tone="default" />
         <StatBadge label="标定记录" value={counts.calibrations} suffix="次" tone="success" />
         <StatBadge label="更换记录" value={counts.replaces} suffix="条" tone="warning" />
+        <StatBadge label="复测坐标" value={counts.surveyCoords} suffix="条" tone="info" />
       </div>
 
       {!activeArray || !activeSummary ? (
@@ -332,17 +373,29 @@ export default function GeometryView() {
                         </text>
                       </g>
                     ))}
-                    {svg.points.map((point) => (
-                      <g key={point.id}>
-                        <circle cx={point.sx} cy={point.sy} r="6" fill="#ffd166" stroke="#1e3a5f" strokeWidth="1.5" />
-                        <text x={point.sx + 9} y={point.sy + 4} className="gb-chart-axis">
-                          {point.code}
-                        </text>
-                      </g>
-                    ))}
+                    {svg.points.map((point) => {
+                      const source = centerPoints.find((item) => item.id === point.id)?.source ?? '中心初设';
+                      return (
+                        <g key={point.id}>
+                          <circle
+                            cx={point.sx}
+                            cy={point.sy}
+                            r="6"
+                            fill={source === '复测认账' ? '#2ecc71' : '#ffd166'}
+                            stroke="#1e3a5f"
+                            strokeWidth="1.5"
+                          />
+                          <text x={point.sx + 9} y={point.sy + 4} className="gb-chart-axis">
+                            {point.code}
+                          </text>
+                        </g>
+                      );
+                    })}
                   </svg>
                   <p className="gb-hint">
-                    虚线为台站间距最大的三条连线；实算孔径 {activeSummary.computedApertureKm} km，登记孔径{' '}
+                    虚线为台站间距最大的三条连线；点位按中心口径——
+                    <span style={{ color: '#1e8449' }}>绿点为复测认账</span>、黄点为中心初设；
+                    未认账复测不参与计算。实算孔径 {activeSummary.computedApertureKm} km，登记孔径{' '}
                     {activeSummary.recordedApertureKm} km，平均台间距 {activeSummary.meanSpacingKm} km。
                   </p>
                 </>
@@ -365,6 +418,10 @@ export default function GeometryView() {
                 <Descriptions.Item label="登记 / 实算孔径">
                   {activeSummary.recordedApertureKm} km / <b>{activeSummary.computedApertureKm} km</b>
                 </Descriptions.Item>
+                <Descriptions.Item label="孔径口径点位">
+                  {activeSummary.acceptedPointCount} 个复测认账 / {activeSummary.stationCount - activeSummary.acceptedPointCount} 个中心初设
+                  <span className="gb-hint">（台站归属认中心，坐标认最新已认账复测）</span>
+                </Descriptions.Item>
                 <Descriptions.Item label="最大 / 最小台间距">
                   {activeSummary.maxPair
                     ? `${activeSummary.maxPair.fromCode} ↔ ${activeSummary.maxPair.toCode} ${activeSummary.maxPair.km} km`
@@ -375,7 +432,7 @@ export default function GeometryView() {
                   {activeSummary.center
                     ? `${activeSummary.center.lat}, ${activeSummary.center.lng}（${bearingDeg(
                         activeSummary.center,
-                        activeStations[0] ?? activeSummary.center
+                        centerPoints[0] ?? activeSummary.center
                       )}° 方位至首站）`
                     : '—'}
                 </Descriptions.Item>
@@ -401,7 +458,19 @@ export default function GeometryView() {
                 dataSource={radial}
                 locale={{ emptyText: <EmptyPanel title="暂无台站" description="该台阵还没有台站。" compact /> }}
                 columns={[
-                  { title: '台站码', dataIndex: 'code', width: 110, className: 'gb-mono' },
+                  { title: '台站码', dataIndex: 'code', width: 100, className: 'gb-mono' },
+                  {
+                    title: '坐标来源',
+                    width: 110,
+                    render: (_: unknown, row) => {
+                      const point = centerPoints.find((item) => item.id === row.id);
+                      return point?.source === '复测认账' ? (
+                        <Tag color="green">复测认账</Tag>
+                      ) : (
+                        <Tag>中心初设</Tag>
+                      );
+                    },
+                  },
                   {
                     title: '距几何中心 (km)',
                     dataIndex: 'km',
@@ -441,6 +510,15 @@ export default function GeometryView() {
               width: 130,
               align: 'right',
               render: (_: unknown, row) => <span className="gb-mono">{row.computedApertureKm}</span>,
+            },
+            {
+              title: '认账点位',
+              dataIndex: 'acceptedPointCount',
+              width: 100,
+              align: 'right',
+              render: (value: number) => (
+                <span className={value > 0 ? 'gb-mono' : 'gb-hint gb-mono'}>{value} 个</span>
+              ),
             },
             {
               title: '平均台间距 (km)',
@@ -504,20 +582,21 @@ export default function GeometryView() {
             <Descriptions.Item label="浏览器记录版本">v{stampedVersion}</Descriptions.Item>
             <Descriptions.Item label="台阵 / 台站">{counts.arrays} / {counts.stations}</Descriptions.Item>
             <Descriptions.Item label="仪器 / 标定">{counts.instruments} / {counts.calibrations}</Descriptions.Item>
-            <Descriptions.Item label="更换记录">{counts.replaces}</Descriptions.Item>
+            <Descriptions.Item label="更换 / 复测">{counts.replaces} / {counts.surveyCoords}</Descriptions.Item>
             <Descriptions.Item label="最近备份时间" span={3}>
               {lastBackupAt ? new Date(lastBackupAt).toLocaleString('zh-CN') : '尚未备份'}
             </Descriptions.Item>
           </Descriptions>
           <p className="gb-hint">
             数据仅保存在当前浏览器 IndexedDB（{DB_NAME}）中，换浏览器或清空站点数据后不会自动跟随，请通过 JSON
-            备份迁移。导出内容包含 arrays / stations / instruments / calibrations / replaces 五张表。
+            备份迁移。导出内容包含 arrays / stations / instruments / calibrations / replaces / surveyCoords 六张表。
           </p>
         </Space>
       </Card>
 
       <p className="gb-hint">
-        提示：孔径按台站两两 Haversine 距离的最大值实算；如需刷新台阵登记孔径，可到「台站仪器」页点击「重算孔径」。
+        提示：孔径按中心口径实算（台站两两 Haversine 最大距离）——坐标取该码最新「已认账」复测，未认账回退中心初设；
+        台站归属与分档认中心台账。复测认账后点此页「按中心口径重算孔径」，或到「台站仪器」页重算单台阵。
       </p>
     </div>
   );

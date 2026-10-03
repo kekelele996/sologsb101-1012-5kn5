@@ -393,7 +393,7 @@ export default function StationInstruments() {
             onClick={() =>
               void dispatch(recomputeAperture(array.id))
                 .unwrap()
-                .then((result) => message.success(`已按经纬度重算孔径：${result.apertureKm} km`))
+                .then((result) => message.success(`已按中心口径重算孔径（认账复测优先）：${result.apertureKm} km`))
             }
           >
             重算孔径

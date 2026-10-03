@@ -48,7 +48,9 @@ import {
 import { selectInstruments } from '@/stores/instrumentSlice';
 import { selectCalibrations, selectReplaces } from '@/stores/calibrationSlice';
 import { APERTURE_BUCKETS, ARRAY_STATES, type ArrayState, type SeisArray } from '@/types/array';
-import { apertureKm, round } from '@/utils/geo';
+import { round } from '@/utils/geo';
+import { apertureFromCenter } from '@/utils/reconcile';
+import { selectSurveyCoords } from '@/stores/surveySlice';
 import { initDatabase } from '@/utils/db';
 
 interface ArrayFormValues {
@@ -70,6 +72,7 @@ export default function ArrayList() {
   const instruments = useAppSelector(selectInstruments);
   const calibrations = useAppSelector(selectCalibrations);
   const replaces = useAppSelector(selectReplaces);
+  const surveyCoords = useAppSelector(selectSurveyCoords);
   const filter = useAppSelector(selectArrayFilter);
   const currentArrayId = useAppSelector(selectCurrentArrayId);
 
@@ -138,14 +141,8 @@ export default function ArrayList() {
         const pendingReplace = replaces.filter(
           (replace) => instrumentIds.has(replace.instrumentId) && replace.state !== '已复核'
         ).length;
-        const computed = apertureKm(
-          arrayStations.map((station) => ({
-            id: station.id,
-            code: station.code,
-            lat: station.lat,
-            lng: station.lng,
-          }))
-        );
+        // 实算孔径认中心口径：已认账复测坐标优先，未认账回退中心初设坐标
+        const computed = apertureFromCenter(row.id, stations, surveyCoords);
         return {
           row,
           stationCount: arrayStations.length,
@@ -160,7 +157,7 @@ export default function ArrayList() {
               : round(((arrayCalibrations.length - unqualified) / arrayCalibrations.length) * 100, 1),
         };
       }),
-    [calibrations, filtered, instruments, replaces, stations]
+    [calibrations, filtered, instruments, replaces, stations, surveyCoords]
   );
 
   const totals = useMemo(
@@ -274,7 +271,7 @@ export default function ArrayList() {
   const handleRecompute = async (row: SeisArray) => {
     await dispatch(syncStationCount(row.id)).unwrap();
     const result = await dispatch(recomputeAperture(row.id)).unwrap();
-    message.success(`已按经纬度重算孔径：${result.apertureKm} km`);
+    message.success(`已按中心口径重算孔径（认账复测优先）：${result.apertureKm} km`);
   };
 
   return (

@@ -13,21 +13,23 @@ import {
 } from '@/utils/db';
 import type { ResponseVerdict } from '@/types/calibration';
 import { apertureKm, centroid, haversineKm, round, stationDistances } from '@/utils/geo';
+import { buildCenterPoints } from '@/utils/reconcile';
 
-/** 备份集合键名 */
+/** 备份集合键名（surveyCoords 为 v3 新增，旧备份缺省时按空数组处理） */
 export const BACKUP_KEYS = ['arrays', 'stations', 'instruments', 'calibrations', 'replaces'] as const;
 export type BackupKey = (typeof BACKUP_KEYS)[number];
 
-export type CountMap = Record<BackupKey, number>;
+export type CountMap = Record<BackupKey, number> & { surveyCoords: number };
 
 /** 组装当前本地数据的完整快照 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [arrays, stations, instruments, calibrations, replaces] = await Promise.all([
+  const [arrays, stations, instruments, calibrations, replaces, surveyCoords] = await Promise.all([
     db.arrays.toArray(),
     db.stations.toArray(),
     db.instruments.toArray(),
     db.calibrations.toArray(),
     db.replaces.toArray(),
+    db.surveyCoords.toArray(),
   ]);
   return {
     app: 'gbseisarray',
@@ -38,6 +40,7 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     instruments,
     calibrations,
     replaces,
+    surveyCoords,
   };
 }
 
@@ -68,6 +71,7 @@ export function validateBackup(input: unknown): {
     instruments: obj.instruments ?? [],
     calibrations: obj.calibrations ?? [],
     replaces: obj.replaces ?? [],
+    surveyCoords: Array.isArray(obj.surveyCoords) ? obj.surveyCoords : [],
   };
   return { ok: true, errors, payload };
 }
@@ -80,6 +84,7 @@ export function countPayload(payload: BackupPayload): CountMap {
     instruments: payload.instruments.length,
     calibrations: payload.calibrations.length,
     replaces: payload.replaces.length,
+    surveyCoords: payload.surveyCoords.length,
   };
 }
 
@@ -117,13 +122,14 @@ export async function importBackup(payload: BackupPayload, overwrite: boolean): 
   if (overwrite) await clearAllTables();
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces, db.surveyCoords],
     async () => {
       await db.arrays.bulkPut(payload.arrays);
       await db.stations.bulkPut(payload.stations);
       await db.instruments.bulkPut(payload.instruments);
       await db.calibrations.bulkPut(payload.calibrations);
       await db.replaces.bulkPut(payload.replaces);
+      await db.surveyCoords.bulkPut(payload.surveyCoords);
     }
   );
   return countPayload(payload);
@@ -160,7 +166,10 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     id: createId('rpl'),
     instrumentId: instrumentMap.get(row.instrumentId) ?? row.instrumentId,
   }));
-  return { ...payload, arrays, stations, instruments, calibrations, replaces };
+  // 复测坐标只按台站码对账、不绑定台站 id：追加导入时重新分配记录 id，台站码保持原值，
+  // 由对账流程重新与新中心名册匹配。
+  const surveyCoords = payload.surveyCoords.map((row) => ({ ...row, id: createId('srv') }));
+  return { ...payload, arrays, stations, instruments, calibrations, replaces, surveyCoords };
 }
 
 /** 按台阵汇总的几何与标定结论 */
@@ -172,8 +181,10 @@ export interface ArrayGeometrySummary {
   deployDate: string;
   /** 数据库登记的孔径 */
   recordedApertureKm: number;
-  /** 由经纬度实算的孔径（最大台间距） */
+  /** 由经纬度实算的孔径（最大台间距，按中心口径点位） */
   computedApertureKm: number;
+  /** 其中进入孔径口径的「复测认账」点位数（其余为中心初设） */
+  acceptedPointCount: number;
   stationCount: number;
   instrumentCount: number;
   /** 几何中心 */
@@ -204,15 +215,12 @@ export function buildArraySummaries(payload: BackupPayload): ArrayGeometrySummar
     );
     const replaces = payload.replaces.filter((replace) => instrumentIds.has(replace.instrumentId));
 
-    const points = stations.map((station) => ({
-      id: station.id,
-      code: station.code,
-      lat: station.lat,
-      lng: station.lng,
-    }));
+    // 中心口径点位：已认账复测坐标优先，未认账回退中心初设坐标（孔径/分档只认这份）
+    const points = buildCenterPoints(stations, payload.surveyCoords ?? []);
     const distances = stationDistances(points);
     const computed = apertureKm(points);
     const center = centroid(points);
+    const acceptedPointCount = points.filter((point) => point.source === '复测认账').length;
     const minSpacingKm = distances.length === 0 ? 0 : distances[distances.length - 1].km;
     const meanSpacingKm =
       distances.length === 0
@@ -236,6 +244,7 @@ export function buildArraySummaries(payload: BackupPayload): ArrayGeometrySummar
     const conclusionParts: string[] = [
       `${stations.length} 个台站、${instruments.length} 台仪器`,
       `实算孔径 ${computed} km`,
+      `孔径口径含 ${acceptedPointCount} 个复测认账点位`,
       `累计 ${calibrations.length} 次标定`,
     ];
     if (unqualifiedCount > 0) conclusionParts.push(`${unqualifiedCount} 次标定不合格`);
@@ -250,6 +259,7 @@ export function buildArraySummaries(payload: BackupPayload): ArrayGeometrySummar
       deployDate: array.deployDate,
       recordedApertureKm: array.apertureKm,
       computedApertureKm: computed,
+      acceptedPointCount,
       stationCount: stations.length,
       instrumentCount: instruments.length,
       center,

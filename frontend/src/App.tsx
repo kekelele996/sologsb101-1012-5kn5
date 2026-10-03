@@ -8,6 +8,7 @@ import { Badge, Button, Layout, Menu, Space, Tag, Typography, message } from 'an
 import {
   AppstoreOutlined,
   DashboardOutlined,
+  EnvironmentOutlined,
   ExperimentOutlined,
   GlobalOutlined,
   SwapOutlined,
@@ -30,6 +31,7 @@ import {
   selectReplaces,
   startCalibrationSubscription,
 } from '@/stores/calibrationSlice';
+import { selectSurveyCoords, startSurveySubscription } from '@/stores/surveySlice';
 import { DB_NAME, DB_VERSION, initDatabase } from '@/utils/db';
 
 const { Header, Sider, Content, Footer } = Layout;
@@ -38,6 +40,7 @@ const { Header, Sider, Content, Footer } = Layout;
 function buildSelectedKey(pathname: string, currentArrayId: string | null): string {
   if (pathname.startsWith('/calibrations')) return ROUTES.calibrations;
   if (pathname.startsWith('/replacements')) return ROUTES.replacements;
+  if (pathname.startsWith('/surveys')) return ROUTES.surveys;
   if (pathname.startsWith('/geometry')) return ROUTES.geometry;
   if (pathname.startsWith('/stations/') && currentArrayId) return ROUTES.stations(currentArrayId);
   return ROUTES.arrays;
@@ -54,6 +57,7 @@ export default function App() {
   const instruments = useAppSelector(selectInstruments);
   const calibrations = useAppSelector(selectCalibrations);
   const replaces = useAppSelector(selectReplaces);
+  const surveyCoords = useAppSelector(selectSurveyCoords);
   const currentArrayId = useAppSelector(selectCurrentArrayId);
   const ready = useAppSelector((state) => state.array.ready);
 
@@ -67,6 +71,7 @@ export default function App() {
         startArraySubscription(dispatch);
         startInstrumentSubscription(dispatch);
         startCalibrationSubscription(dispatch);
+        startSurveySubscription(dispatch);
       } catch (error) {
         if (cancelled) return;
         messageApi.error(
@@ -83,6 +88,8 @@ export default function App() {
   const selectedKey = buildSelectedKey(location.pathname, currentArrayId);
   const unqualified = calibrations.filter((row) => row.responseVerdict === '不合格').length;
   const pendingReplaces = replaces.filter((row) => row.state !== '已复核').length;
+  const pendingSurveys = surveyCoords.filter((row) => row.status !== '已认账').length;
+  const pendingSurveyAccept = surveyCoords.filter((row) => row.status === '待认账').length;
 
   return (
     <>
@@ -118,6 +125,11 @@ export default function App() {
               },
               { key: ROUTES.calibrations, icon: <DashboardOutlined />, label: '标定记录台' },
               { key: ROUTES.replacements, icon: <SwapOutlined />, label: '合格评定与更换' },
+              {
+                key: ROUTES.surveys,
+                icon: <EnvironmentOutlined />,
+                label: pendingSurveyAccept > 0 ? `复测对账（${pendingSurveyAccept} 待认账）` : '复测坐标对账',
+              },
               { key: ROUTES.geometry, icon: <GlobalOutlined />, label: '台阵几何与备份' },
             ]}
           />
@@ -134,6 +146,9 @@ export default function App() {
               </span>
               <span>
                 <SwapOutlined /> 更换未闭环 {pendingReplaces}
+              </span>
+              <span>
+                <EnvironmentOutlined /> 复测 {surveyCoords.length} · 待处理 {pendingSurveys}
               </span>
             </Space>
           </div>

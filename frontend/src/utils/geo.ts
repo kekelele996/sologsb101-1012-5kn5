@@ -34,12 +34,77 @@ export function toDms(value: number, axis: 'lat' | 'lng'): string {
   const positive = axis === 'lat' ? 'N' : 'E';
   const negative = axis === 'lat' ? 'S' : 'W';
   const hemisphere = value >= 0 ? positive : negative;
+  return `${formatDmsParts(value)}${hemisphere}`;
+}
+
+/**
+ * 解析度分秒文本为带符号的十进制度（旧外业数据只有度分秒，升级时据此补出十进制）。
+ * 支持：`30°50′31.6″N`、`30 50 31.6 N`、`30°50′31.6″`、可省略分秒；
+ * 半球字母 N/S/E/W 或前导正负号决定符号。无法解析返回 null。
+ */
+export function parseDms(text: string | null | undefined, axis: 'lat' | 'lng'): number | null {
+  if (typeof text !== 'string') return null;
+  const raw = text.trim();
+  if (raw.length === 0) return null;
+  const upper = raw.toUpperCase();
+  const positive = axis === 'lat' ? 'N' : 'E';
+  const negative = axis === 'lat' ? 'S' : 'W';
+  let sign = 1;
+  if (upper.includes(negative)) sign = -1;
+  else if (upper.includes(positive)) sign = 1;
+  else if (raw.trimStart().startsWith('-')) sign = -1;
+  const numbers = raw.match(/\d+(?:\.\d+)?/g);
+  if (!numbers || numbers.length === 0) return null;
+  const degree = Number(numbers[0]);
+  const minute = numbers[1] !== undefined ? Number(numbers[1]) : 0;
+  const second = numbers[2] !== undefined ? Number(numbers[2]) : 0;
+  if (!Number.isFinite(degree) || !Number.isFinite(minute) || !Number.isFinite(second)) return null;
+  if (minute >= 60 || second >= 60) return null;
+  const decimal = sign * (degree + minute / 60 + second / 3600);
+  const limit = axis === 'lat' ? 90 : 180;
+  if (decimal < -limit || decimal > limit) return null;
+  return round(decimal, 6);
+}
+
+/** 十进制度 → 不带半球后缀的「度°分′秒″」串（供回填度分秒原始记录） */
+export function formatDmsParts(value: number): string {
   const abs = Math.abs(value);
   const degree = Math.floor(abs);
   const minutesFloat = (abs - degree) * 60;
   const minute = Math.floor(minutesFloat);
   const second = ((minutesFloat - minute) * 60).toFixed(1);
-  return `${degree}°${minute}′${second}″${hemisphere}`;
+  return `${degree}°${minute}′${second}″`;
+}
+
+/** 由十进制坐标生成完整度分秒记录（含半球后缀），供新录入复测自动回填 */
+export function decimalToDmsRecord(lat: number, lng: number): { latDms: string; lngDms: string } {
+  return { latDms: toDms(lat, 'lat'), lngDms: toDms(lng, 'lng') };
+}
+
+/**
+ * 从度分秒对补出十进制度：优先用已解析的十进制，缺失时由度分秒解析。
+ * 返回 null 表示两份都无法得到合法坐标（该点位不能参与孔径计算）。
+ */
+export function resolveCoord(input: {
+  lat?: number | null;
+  lng?: number | null;
+  latDms?: string | null;
+  lngDms?: string | null;
+}): { lat: number; lng: number } | null {
+  const hasDecimal =
+    typeof input.lat === 'number' &&
+    typeof input.lng === 'number' &&
+    Number.isFinite(input.lat) &&
+    Number.isFinite(input.lng) &&
+    input.lat !== 0 &&
+    input.lng !== 0;
+  if (hasDecimal && validateLatLng(input.lat as number, input.lng as number).length === 0) {
+    return { lat: input.lat as number, lng: input.lng as number };
+  }
+  const lat = parseDms(input.latDms, 'lat');
+  const lng = parseDms(input.lngDms, 'lng');
+  if (lat === null || lng === null) return null;
+  return { lat, lng };
 }
 
 /** Haversine 距离（km） */
