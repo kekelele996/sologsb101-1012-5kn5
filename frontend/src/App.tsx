@@ -7,6 +7,7 @@ import { Link, Outlet, useLocation, useNavigate } from 'react-router-dom';
 import { Badge, Button, Layout, Menu, Space, Tag, Typography, message } from 'antd';
 import {
   AppstoreOutlined,
+  CompassOutlined,
   DashboardOutlined,
   ExperimentOutlined,
   GlobalOutlined,
@@ -30,6 +31,11 @@ import {
   selectReplaces,
   startCalibrationSubscription,
 } from '@/stores/calibrationSlice';
+import {
+  selectSurveyCounts,
+  selectSurveys,
+  startSurveySubscription,
+} from '@/stores/surveySlice';
 import { DB_NAME, DB_VERSION, initDatabase } from '@/utils/db';
 
 const { Header, Sider, Content, Footer } = Layout;
@@ -38,6 +44,7 @@ const { Header, Sider, Content, Footer } = Layout;
 function buildSelectedKey(pathname: string, currentArrayId: string | null): string {
   if (pathname.startsWith('/calibrations')) return ROUTES.calibrations;
   if (pathname.startsWith('/replacements')) return ROUTES.replacements;
+  if (pathname.startsWith('/surveys')) return ROUTES.surveys;
   if (pathname.startsWith('/geometry')) return ROUTES.geometry;
   if (pathname.startsWith('/stations/') && currentArrayId) return ROUTES.stations(currentArrayId);
   return ROUTES.arrays;
@@ -54,6 +61,8 @@ export default function App() {
   const instruments = useAppSelector(selectInstruments);
   const calibrations = useAppSelector(selectCalibrations);
   const replaces = useAppSelector(selectReplaces);
+  const surveys = useAppSelector(selectSurveys);
+  const surveyCounts = useAppSelector(selectSurveyCounts);
   const currentArrayId = useAppSelector(selectCurrentArrayId);
   const ready = useAppSelector((state) => state.array.ready);
 
@@ -67,6 +76,7 @@ export default function App() {
         startArraySubscription(dispatch);
         startInstrumentSubscription(dispatch);
         startCalibrationSubscription(dispatch);
+        startSurveySubscription(dispatch);
       } catch (error) {
         if (cancelled) return;
         messageApi.error(
@@ -83,6 +93,7 @@ export default function App() {
   const selectedKey = buildSelectedKey(location.pathname, currentArrayId);
   const unqualified = calibrations.filter((row) => row.responseVerdict === '不合格').length;
   const pendingReplaces = replaces.filter((row) => row.state !== '已复核').length;
+  const surveyTodo = surveyCounts.pending + surveyCounts.held + surveyCounts.failed;
 
   return (
     <>
@@ -118,6 +129,16 @@ export default function App() {
               },
               { key: ROUTES.calibrations, icon: <DashboardOutlined />, label: '标定记录台' },
               { key: ROUTES.replacements, icon: <SwapOutlined />, label: '合格评定与更换' },
+              {
+                key: ROUTES.surveys,
+                icon: <CompassOutlined />,
+                label: (
+                  <Space size={6}>
+                    复测对账台
+                    {surveyTodo > 0 ? <Badge count={surveyTodo} size="small" color="#d68910" /> : null}
+                  </Space>
+                ),
+              },
               { key: ROUTES.geometry, icon: <GlobalOutlined />, label: '台阵几何与备份' },
             ]}
           />
@@ -134,6 +155,9 @@ export default function App() {
               </span>
               <span>
                 <SwapOutlined /> 更换未闭环 {pendingReplaces}
+              </span>
+              <span>
+                <CompassOutlined /> 复测 {surveys.length} · 待处理 {surveyTodo}
               </span>
             </Space>
           </div>

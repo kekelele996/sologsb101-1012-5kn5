@@ -252,10 +252,11 @@ export default function StationInstruments() {
         siteNote: values.siteNote?.trim() ?? '',
       };
       if (editingStationId) {
+        // 编辑不触碰坐标来源与复测日期：实测身份由对账认下时写回
         await dispatch(updateStation({ id: editingStationId, patch: payload })).unwrap();
         message.success('台站已更新');
       } else {
-        await dispatch(createStation(payload)).unwrap();
+        await dispatch(createStation({ ...payload, coordSource: '初设', surveyedAt: '' })).unwrap();
         message.success(`台站 ${payload.code} 已新增（${formatLatLng(payload.lat, payload.lng)}）`);
       }
       setStationModalOpen(false);
@@ -473,13 +474,24 @@ export default function StationInstruments() {
             },
             {
               title: '经纬度',
-              width: 200,
+              width: 230,
               render: (_: unknown, row: StationRow) => (
                 <div>
                   <div className="gb-mono">
                     {row.station.lat.toFixed(4)}, {row.station.lng.toFixed(4)}
                   </div>
                   <div className="gb-hint gb-mono">{formatLatLng(row.station.lat, row.station.lng)}</div>
+                  <div style={{ marginTop: 2 }}>
+                    <Tag
+                      color={row.station.coordSource === '实测' ? 'green' : 'default'}
+                      style={{ marginInlineEnd: 4 }}
+                    >
+                      {row.station.coordSource}坐标
+                    </Tag>
+                    {row.station.surveyedAt ? (
+                      <span className="gb-hint gb-mono">复测 {row.station.surveyedAt}</span>
+                    ) : null}
+                  </div>
                 </div>
               ),
             },

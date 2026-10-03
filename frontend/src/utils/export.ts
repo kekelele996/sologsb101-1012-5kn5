@@ -14,20 +14,22 @@ import {
 import type { ResponseVerdict } from '@/types/calibration';
 import { apertureKm, centroid, haversineKm, round, stationDistances } from '@/utils/geo';
 
-/** 备份集合键名 */
+/** 备份集合键名（五张核心台账表，导入时强制校验） */
 export const BACKUP_KEYS = ['arrays', 'stations', 'instruments', 'calibrations', 'replaces'] as const;
 export type BackupKey = (typeof BACKUP_KEYS)[number];
 
-export type CountMap = Record<BackupKey, number>;
+/** 统计口径：五张核心表 + 复测记录表（旧备份可能缺失，按可选处理） */
+export type CountMap = Record<BackupKey | 'surveys', number>;
 
 /** 组装当前本地数据的完整快照 */
 export async function buildBackupPayload(): Promise<BackupPayload> {
-  const [arrays, stations, instruments, calibrations, replaces] = await Promise.all([
+  const [arrays, stations, instruments, calibrations, replaces, surveys] = await Promise.all([
     db.arrays.toArray(),
     db.stations.toArray(),
     db.instruments.toArray(),
     db.calibrations.toArray(),
     db.replaces.toArray(),
+    db.surveys.toArray(),
   ]);
   return {
     app: 'gbseisarray',
@@ -38,6 +40,7 @@ export async function buildBackupPayload(): Promise<BackupPayload> {
     instruments,
     calibrations,
     replaces,
+    surveys,
   };
 }
 
@@ -68,6 +71,8 @@ export function validateBackup(input: unknown): {
     instruments: obj.instruments ?? [],
     calibrations: obj.calibrations ?? [],
     replaces: obj.replaces ?? [],
+    // v3 新增表：旧备份没有该字段时按空表处理
+    surveys: Array.isArray(obj.surveys) ? obj.surveys : [],
   };
   return { ok: true, errors, payload };
 }
@@ -80,6 +85,7 @@ export function countPayload(payload: BackupPayload): CountMap {
     instruments: payload.instruments.length,
     calibrations: payload.calibrations.length,
     replaces: payload.replaces.length,
+    surveys: payload.surveys.length,
   };
 }
 
@@ -117,13 +123,14 @@ export async function importBackup(payload: BackupPayload, overwrite: boolean): 
   if (overwrite) await clearAllTables();
   await db.transaction(
     'rw',
-    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces],
+    [db.arrays, db.stations, db.instruments, db.calibrations, db.replaces, db.surveys],
     async () => {
       await db.arrays.bulkPut(payload.arrays);
       await db.stations.bulkPut(payload.stations);
       await db.instruments.bulkPut(payload.instruments);
       await db.calibrations.bulkPut(payload.calibrations);
       await db.replaces.bulkPut(payload.replaces);
+      await db.surveys.bulkPut(payload.surveys);
     }
   );
   return countPayload(payload);
@@ -160,7 +167,12 @@ export function remapIds(payload: BackupPayload): BackupPayload {
     id: createId('rpl'),
     instrumentId: instrumentMap.get(row.instrumentId) ?? row.instrumentId,
   }));
-  return { ...payload, arrays, stations, instruments, calibrations, replaces };
+  const surveys = payload.surveys.map((row) => ({
+    ...row,
+    id: createId('svy'),
+    stationId: row.stationId ? stationMap.get(row.stationId) ?? row.stationId : null,
+  }));
+  return { ...payload, arrays, stations, instruments, calibrations, replaces, surveys };
 }
 
 /** 按台阵汇总的几何与标定结论 */

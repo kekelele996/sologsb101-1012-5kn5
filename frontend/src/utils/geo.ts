@@ -42,6 +42,47 @@ export function toDms(value: number, axis: 'lat' | 'lng'): string {
   return `${degree}°${minute}′${second}″${hemisphere}`;
 }
 
+/**
+ * 度分秒文本 → 十进制度（旧数据只有度分秒时补算十进制用）。
+ * 支持 `30°50′31.6″N`、`30°50'31.6"N`、`30度50分31.6秒`、`30:50:31.6`、`N30 50 31.6`
+ * 以及纯十进制文本；解析失败（结构非法、半球字母与轴向不符）返回 null。
+ * 只做结构解析，不做范围校验——范围合法性由对账时的 validateLatLng 把关。
+ */
+export function parseDms(input: string, axis: 'lat' | 'lng'): number | null {
+  const text = input.trim();
+  if (text.length === 0) return null;
+  // 纯十进制文本直接取值（含负号）
+  const plain = Number(text);
+  if (Number.isFinite(plain)) return round(plain, 6);
+
+  let sign = 1;
+  let body = text.toUpperCase();
+  const hemisphere = body.match(/[NSEW]/);
+  if (hemisphere) {
+    const letter = hemisphere[0];
+    const expected = axis === 'lat' ? ['N', 'S'] : ['E', 'W'];
+    if (!expected.includes(letter)) return null;
+    if (letter === 'S' || letter === 'W') sign = -1;
+    body = body.replace(/[NSEW]/g, '');
+  }
+  const normalized = body
+    .replace(/[°º˚]/g, ' ')
+    .replace(/[′']/g, ' ')
+    .replace(/[″"]/g, ' ')
+    .replace(/度|分|秒/g, ' ')
+    .replace(/[:：,，]/g, ' ');
+  const parts = normalized
+    .split(/\s+/)
+    .filter((item) => item.length > 0)
+    .map(Number);
+  if (parts.length === 0 || parts.length > 3 || parts.some((item) => !Number.isFinite(item))) {
+    return null;
+  }
+  const [degree, minute = 0, second = 0] = parts;
+  if (degree < 0 || minute < 0 || minute >= 60 || second < 0 || second >= 60) return null;
+  return round(sign * (degree + minute / 60 + second / 3600), 6);
+}
+
 /** Haversine 距离（km） */
 export function haversineKm(
   from: { lat: number; lng: number },

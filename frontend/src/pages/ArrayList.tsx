@@ -47,7 +47,7 @@ import {
 } from '@/stores/arraySlice';
 import { selectInstruments } from '@/stores/instrumentSlice';
 import { selectCalibrations, selectReplaces } from '@/stores/calibrationSlice';
-import { APERTURE_BUCKETS, ARRAY_STATES, type ArrayState, type SeisArray } from '@/types/array';
+import { APERTURE_BUCKETS, ARRAY_STATES, apertureBucketOf, type ArrayState, type SeisArray } from '@/types/array';
 import { apertureKm, round } from '@/utils/geo';
 import { initDatabase } from '@/utils/db';
 
@@ -393,8 +393,11 @@ export default function ArrayList() {
                 </div>
                 <Space direction="vertical" size={4} style={{ fontSize: 13, color: '#5b6b78' }}>
                   <span>
-                    登记孔径 <b className="gb-mono">{card.row.apertureKm}</b> km · 实算孔径{' '}
-                    <b className="gb-mono">{card.computedApertureKm}</b> km
+                    登记孔径 <b className="gb-mono">{card.row.apertureKm}</b> km{' '}
+                    <Tag color="#1e3a5f" style={{ marginLeft: 2 }}>
+                      {apertureBucketOf(card.row.apertureKm)}
+                    </Tag>{' '}
+                    · 实算孔径 <b className="gb-mono">{card.computedApertureKm}</b> km
                   </span>
                   <span>
                     累计标定 <b className="gb-mono">{card.calibrationCount}</b> 次

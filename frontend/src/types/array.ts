@@ -55,3 +55,17 @@ export const APERTURE_BUCKETS: Array<{ label: string; min: number | null; max: n
   { label: '20 ~ 50 km', min: 20, max: 50 },
   { label: '大于 50 km', min: 50, max: null },
 ];
+
+/**
+ * 按孔径数值返回分档标签（如「5 ~ 20 km」）。
+ * 孔径分档认中心：入参应取中心台账登记孔径（arrays.apertureKm），而非测量组单侧实算值。
+ */
+export function apertureBucketOf(km: number): string {
+  for (const bucket of APERTURE_BUCKETS) {
+    if (bucket.min === null && bucket.max === null) continue; // 跳过「全部孔径」
+    const aboveMin = bucket.min === null || km >= bucket.min;
+    const belowMax = bucket.max === null || km < bucket.max;
+    if (aboveMin && belowMax) return bucket.label;
+  }
+  return APERTURE_BUCKETS[APERTURE_BUCKETS.length - 1].label;
+}
